@@ -46,3 +46,25 @@ SUBSCRIBE:
 
 INSTAGRAM: https://www.instagram.com/diy_machines/?hl=en
 FACEBOOK: https://www.facebook.com/diymachines/
+
+==========
+
+## ESP8266 WiFi sürümü (Shelf_Edge_Clock_ESP8266)
+
+Arduino Nano + DS3231 yerine ESP8266 (NodeMCU / Wemos D1 mini) ile çalışan sürüm.
+Saati internetten (NTP) alır; RTC modülüne gerek yoktur.
+
+- Ayar sayfası: `http://<saat-ismi>.local` (varsayılan `http://clockcontrol.local`)
+  - Saat ve alt ışık için otomatik (ışık sensörü) veya elle parlaklık, yumuşak parlaklık geçişi
+  - Saat ve dakika renkleri
+  - Dakika ve saat başı animasyonları, "Dene" düğmeleri, animasyon hızı, gece sessiz mod
+  - WiFi ve saat ismi ayarları (`/wifi`)
+- WiFi bulunamazsa saat isminde bir kurulum ağı açar (alt ışıklar turuncu yanıp söner)
+- WiFi koparsa saat çalışmaya devam eder, bağlantı kendiliğinden geri gelir
+- WiFi üzerinden kod yükleme (OTA)
+
+Bağlantılar: saat şeridi D2, alt ışık D3, ışık sensörü A0. (D3 açılışta özel bir pindir; alt ışık D1'e taşınırsa açılış daha güvenilir olur.)
+
+Kütüphaneler: Adafruit NeoPixel, WiFiManager (tzapu). Kart paketi: esp8266.
+
+Derlemeden önce `secrets.example.h` dosyasını `secrets.h` adıyla kopyalayıp OTA şifresini yazın. `secrets.h` GitHub'a yüklenmez.

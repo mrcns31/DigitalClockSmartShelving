@@ -1,0 +1,7 @@
+# Kişisel / gizli dosyalar
+secrets.h
+yedek/
+*.bin
+
+# macOS
+.DS_Store
