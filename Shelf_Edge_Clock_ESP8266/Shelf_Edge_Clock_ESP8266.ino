@@ -74,6 +74,7 @@ const unsigned long STATUS_PRINT_MS         = 60UL * 1000;
 // Animasyonlar (animations.ino)
 const unsigned long ANIMATION_FRAME_MS      = 30;    // animasyon sırasında saniyede ~33 kare
 const unsigned long MINUTE_ANIMATION_MS     = 900;   // "Normal" hızda süreler
+const unsigned long FLASH_BREATHE_MS        = 2000;  // alt ışık nefesi için daha uzun
 const unsigned long HOUR_ANIMATION_MS       = 3000;
 const float ANIMATION_SPEED_FACTORS[]       = { 1.6, 1.0, 0.6 };  // Yavaş, Normal, Hızlı
 
@@ -105,12 +106,18 @@ struct Settings {
   bool quietEnabled;
   uint16_t quietStart;       // gün içindeki dakika (23:00 = 1380)
   uint16_t quietEnd;
+  // Sonradan eklendi: alt ışık her animasyona eşlik etsin
+  uint8_t extraMagic;
+  bool downlightAccompany;
 };
 Settings settings;
 const uint8_t ANIM_MAGIC = 0xA1;
+const uint8_t EXTRA_MAGIC = 0xB1;
 
-enum MinuteAnimation { MIN_OFF, MIN_CROSSFADE, MIN_DRAW, MIN_WIPE, MIN_DISSOLVE, MIN_FLASH, MIN_COLOURWAVE, MINUTE_ANIMATION_COUNT };
-enum HourAnimation { HOUR_OFF, HOUR_SNAKE, HOUR_RAINBOW, HOUR_SLOT, HOUR_FIREWORKS, HOUR_FILL, HOUR_BREATHE, HOUR_RANDOM, HOUR_ANIMATION_COUNT };
+enum MinuteAnimation { MIN_OFF, MIN_CROSSFADE, MIN_DRAW, MIN_WIPE, MIN_DISSOLVE, MIN_FLASH, MIN_COLOURWAVE, MIN_FLASH_BREATHE,
+                       MIN_SLIDE_UP, MIN_TYPEWRITER, MIN_COMET, MIN_HEARTBEAT, MIN_BLINK, MIN_EMBER, MIN_RANDOM, MINUTE_ANIMATION_COUNT };
+enum HourAnimation { HOUR_OFF, HOUR_SNAKE, HOUR_RAINBOW, HOUR_SLOT, HOUR_FIREWORKS, HOUR_FILL, HOUR_BREATHE, HOUR_RANDOM,
+                     HOUR_CHIME, HOUR_COUNTDOWN, HOUR_MATRIX, HOUR_OCEAN, HOUR_LIGHTNING, HOUR_DOWNLIGHT_RAINBOW, HOUR_ANIMATION_COUNT };
 
 // Saat yüzü: her LED'in olması gereken rengi. Animasyonlar eski yüzden yenisine geçer.
 const int FACE_PIXELS = 207;               // rakamlara ait LED sayısı (kalanlar boşta)
@@ -125,9 +132,13 @@ bool animationActive = false;
 bool animationHourly = false;
 uint8_t animationType = 0;
 unsigned long animationStart = 0;
-unsigned long animationDuration = 0;
+unsigned long animationDuration = 0;        // toplam süre (alt ışık eşlik ediyorsa daha uzun olabilir)
+unsigned long animationPixelDuration = 0;   // rakamlardaki animasyonun süresi
+uint32_t downlightAnimationColour = 0xFFFFFF;
 uint32_t animationSeed = 0;
 bool digitChanged[4];
+uint8_t typewriterRank[4][7];             // Daktilo: her rakamda yeni segmentlerin sırası
+uint8_t typewriterSteps = 1;
 
 // Işık sensörü yumuşatma
 const int numReadings = 10;
@@ -258,6 +269,7 @@ void startNetworkServices() {
   MDNS.addService("http", "tcp", 80);
 
   server.on("/", HTTP_GET, handleRoot);
+  server.on("/style.css", HTTP_GET, handleStyle);
   server.on("/getSettings", HTTP_GET, handleGetSettings);
   server.on("/update", HTTP_POST, handleUpdate);
   server.on("/preview", HTTP_POST, handlePreview);
@@ -276,86 +288,165 @@ void startNetworkServices() {
 
 // ---------- Web sayfaları ----------
 
+// Ortak stil: telefon ve bilgisayar uyumlu, karanlık mod destekli
+const char STYLE_CSS[] PROGMEM = R"rawliteral(
+:root{--bg:#f2f3f7;--card:#fff;--text:#1d1d1f;--muted:#6e6e73;--line:#e5e5ea;--accent:#2f7cf6;--ok:#34c759;--danger:#e5484d}
+@media(prefers-color-scheme:dark){:root{--bg:#000;--card:#1c1c1e;--text:#f2f2f7;--muted:#98989d;--line:#38383a;--accent:#4a90ff;--ok:#30d158}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;-webkit-text-size-adjust:100%}
+.container{max-width:560px;margin:0 auto;padding:16px 16px 100px}
+header{display:flex;align-items:baseline;justify-content:space-between;gap:8px;flex-wrap:wrap;margin:8px 4px 16px}
+h1{font-size:28px;margin:0}
+.sub{color:var(--muted);font-size:15px}
+.grid{display:grid;gap:16px;grid-template-columns:minmax(0,1fr)}
+.grid>*{min-width:0}
+.col{display:grid;gap:16px;align-content:start;grid-template-columns:minmax(0,1fr)}
+.card{background:var(--card);border-radius:14px;padding:16px 18px;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 8px;font-weight:600}
+.row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:48px}
+.slider+.row{border-top:1px solid var(--line)}
+.slider{display:flex;align-items:center;gap:12px;padding:2px 0 10px;transition:opacity .2s}
+.slider.off{opacity:.35}
+.slider output{min-width:36px;text-align:right;font-weight:600;color:var(--accent)}
+input[type=range]{flex:1;width:100%;accent-color:var(--accent);height:28px;margin:0}
+.field{padding:12px 0}
+.field+.field{border-top:1px solid var(--line)}
+.field>label{display:block;margin-bottom:8px}
+.field>.row{min-height:0;margin-bottom:10px}
+.inline{display:flex;gap:8px;align-items:center}
+.inline select{flex:1;min-width:0}
+select,input[type=time],input[type=text],input[type=password]{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:0 12px;height:44px;margin:0}
+.field input[type=text],.field input[type=password]{width:100%}
+.switch{appearance:none;-webkit-appearance:none;width:51px;height:31px;border-radius:31px;background:var(--line);position:relative;cursor:pointer;transition:background .2s;flex:none;margin:0}
+.switch::after{content:"";position:absolute;top:2px;left:2px;width:27px;height:27px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:left .2s}
+.switch:checked{background:var(--ok)}
+.switch:checked::after{left:22px}
+.seg{display:flex;background:var(--bg);border-radius:10px;padding:3px}
+.seg input{display:none}
+.seg label{flex:1;text-align:center;padding:9px 4px;border-radius:8px;cursor:pointer;font-size:15px}
+.seg input:checked+label{background:var(--card);box-shadow:0 1px 3px rgba(0,0,0,.15);font-weight:600}
+.times{display:flex;align-items:center;gap:8px;transition:opacity .2s}
+.times input{flex:1;min-width:0}
+.colors{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:4px}
+.swatch{display:flex;flex-direction:column;align-items:center;gap:8px;padding:14px;border:1px solid var(--line);border-radius:12px;cursor:pointer}
+.swatch input{width:64px;height:64px;border:none;border-radius:50%;padding:0;background:none;cursor:pointer}
+.swatch input::-webkit-color-swatch-wrapper{padding:0}
+.swatch input::-webkit-color-swatch{border:none;border-radius:50%}
+.swatch input::-moz-color-swatch{border:none;border-radius:50%}
+.btn{font:inherit;font-weight:600;border:none;border-radius:10px;padding:0 18px;height:44px;cursor:pointer;color:#fff;background:var(--accent);flex:none}
+.btn.primary{background:var(--ok);width:100%;height:50px;font-size:17px}
+.btn.danger{background:var(--danger);width:100%}
+.bar{position:fixed;left:0;right:0;bottom:0;padding:24px 16px calc(12px + env(safe-area-inset-bottom));background:linear-gradient(rgba(0,0,0,0),var(--bg) 45%)}
+.bar .btn{display:block;max-width:528px;margin:0 auto}
+.info{display:grid;grid-template-columns:auto 1fr;gap:8px 16px;margin:4px 0 0;font-size:15px}
+.info dt{color:var(--muted)}
+.info dd{margin:0;text-align:right;overflow-wrap:anywhere}
+.note{color:var(--muted);font-size:14px;margin:8px 0 0}
+a{color:var(--accent);text-decoration:none}
+.link{display:block;text-align:center;padding:14px 0 2px}
+#toast{position:fixed;left:50%;top:16px;transform:translate(-50%,-90px);background:var(--text);color:var(--card);padding:10px 20px;border-radius:22px;font-size:15px;transition:transform .3s;z-index:9;white-space:nowrap}
+#toast.show{transform:translate(-50%,0)}
+@media(min-width:900px){.container{max-width:980px}.grid{grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}.bar .btn{max-width:360px}}
+.container.narrow{max-width:560px}
+.narrow .grid{grid-template-columns:minmax(0,1fr)}
+)rawliteral";
+
 const char MAIN_PAGE[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 <html lang="tr"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Saat Ayarları</title>
-<style>
-body{font-family:Arial;margin:20px;background:#f0f0f0}
-.container{max-width:480px;margin:0 auto}
-.box{margin:16px 0;padding:15px;background:#fff;border-radius:8px}
-h3{margin-top:0}
-label{display:inline-block;width:190px}
-input[type=range]{width:180px;vertical-align:middle}
-input[type=color]{width:70px;height:40px;vertical-align:middle}
-.value{font-weight:bold;color:#2196F3}
-.info{color:#555;font-size:14px;line-height:1.6}
-button{padding:10px 20px;background:#4CAF50;color:#fff;border:none;border-radius:4px;cursor:pointer}
-button.small{padding:6px 12px;background:#2196F3;margin-left:6px}
-select{padding:6px;font-size:14px}
-.note{color:#555;font-size:14px}
-a{color:#2196F3}
-</style></head><body><div class="container">
-<h2><span id="clockTitle">Saat</span> Ayarları</h2>
-<div class="box"><h3>Saat Parlaklık Kontrolü</h3>
-<p><label>Saat Otomatik Parlaklık:</label><input type="checkbox" id="autoBar1"></p>
-<p><label>Saat Parlaklığı:</label><input type="range" id="bar1" min="0" max="255"> <span class="value" id="bar1Value"></span></p>
+<link rel="stylesheet" href="/style.css">
+</head><body>
+<div id="toast"></div>
+<div class="container">
+<header><h1 id="clockTitle">Saat</h1><span class="sub" id="clockTime"></span></header>
+<div class="grid">
+
+<div class="col">
+<section class="card"><h2>Parlaklık</h2>
+<div class="row"><span>Saat · otomatik</span><input type="checkbox" class="switch" id="autoBar1"></div>
+<div class="slider" id="slider1"><input type="range" id="bar1" min="0" max="255"><output id="bar1Value"></output></div>
+<div class="row"><span>Alt ışık · otomatik</span><input type="checkbox" class="switch" id="autoBar2"></div>
+<div class="slider" id="slider2"><input type="range" id="bar2" min="0" max="255"><output id="bar2Value"></output></div>
+<p class="note">Otomatik açıkken parlaklık ışık sensörüne göre ayarlanır.</p>
+</section>
+
+<section class="card"><h2>Renkler</h2>
+<div class="colors">
+<label class="swatch"><input type="color" id="hourColor"><span>Saat</span></label>
+<label class="swatch"><input type="color" id="minuteColor"><span>Dakika</span></label>
+</div></section>
 </div>
-<div class="box"><h3>Alt Işık Parlaklık Kontrolü</h3>
-<p><label>Alt Işık Otomatik Parlaklık:</label><input type="checkbox" id="autoBar2"></p>
-<p><label>Alt Işık Parlaklığı:</label><input type="range" id="bar2" min="0" max="255"> <span class="value" id="bar2Value"></span></p>
-</div>
-<div class="box"><h3>Renk Ayarları</h3>
-<p><label>Dakika Rengi:</label><input type="color" id="minuteColor"></p>
-<p><label>Saat Rengi:</label><input type="color" id="hourColor"></p>
-</div>
-<div class="box"><h3>Animasyonlar</h3>
-<p><label>Dakika geçişi:</label><select id="minuteAnim">
+<div class="col">
+<section class="card"><h2>Animasyonlar</h2>
+<div class="field"><label for="minuteAnim">Dakika geçişi</label>
+<div class="inline"><select id="minuteAnim">
 <option value="0">Kapalı</option><option value="1">Yumuşak geçiş</option><option value="2">Segment çizimi</option>
 <option value="3">Perde</option><option value="4">Işıltı</option><option value="5">Kısa parlama</option>
-<option value="6">Renk dalgası</option></select>
-<button class="small" onclick="preview('minute')">Dene</button></p>
-<p><label>Saat başı:</label><select id="hourAnim">
+<option value="6">Renk dalgası</option><option value="7">Kısa parlama + alt ışık nefesi</option>
+<option value="8">Yukarı kaydırma</option><option value="9">Daktilo</option><option value="10">Kuyruklu yıldız</option>
+<option value="11">Kalp atışı</option><option value="12">Göz kırpma</option><option value="13">Kor</option><option value="14">Rastgele</option></select>
+<button class="btn" onclick="preview('minute')">Dene</button></div></div>
+<div class="field"><label for="hourAnim">Saat başı</label>
+<div class="inline"><select id="hourAnim">
 <option value="0">Kapalı</option><option value="1">Işık yılanı</option><option value="2">Gökkuşağı dalgası</option>
 <option value="3">Slot makinesi</option><option value="4">Havai fişek</option><option value="5">Doldur ve göster</option>
-<option value="6">Alt ışık nefesi</option><option value="7">Rastgele</option></select>
-<button class="small" onclick="preview('hour')">Dene</button></p>
-<p><label>Animasyon hızı:</label>
-<input type="radio" name="speed" value="0" id="speed0">Yavaş
-<input type="radio" name="speed" value="1" id="speed1">Normal
-<input type="radio" name="speed" value="2" id="speed2">Hızlı</p>
-<p><label>Gece sessiz mod:</label><input type="checkbox" id="quiet"></p>
-<p class="note">Bu saatler arasında animasyon oynamaz:
-<input type="time" id="quietStart"> – <input type="time" id="quietEnd"></p>
+<option value="6">Alt ışık nefesi</option><option value="8">Saat çanı</option><option value="9">Geri sayım</option><option value="10">Matrix yağmuru</option>
+<option value="11">Okyanus dalgası</option><option value="12">Şimşek</option><option value="13">Alt ışık gökkuşağı</option>
+<option value="7">Rastgele</option></select>
+<button class="btn" onclick="preview('hour')">Dene</button></div></div>
+<div class="field"><label>Hız</label>
+<div class="seg"><input type="radio" name="speed" value="0" id="speed0"><label for="speed0">Yavaş</label><input type="radio" name="speed" value="1" id="speed1"><label for="speed1">Normal</label><input type="radio" name="speed" value="2" id="speed2"><label for="speed2">Hızlı</label></div></div>
+<div class="field"><div class="row"><span>Alt ışık eşlik etsin</span><input type="checkbox" class="switch" id="accompany"></div>
+<p class="note">Açıkken her animasyonda alt ışıklar bir kez yumuşakça kısılıp açılır.</p></div>
+<div class="field"><div class="row"><span>Gece sessiz mod</span><input type="checkbox" class="switch" id="quiet"></div>
+<div class="times" id="quietTimes"><input type="time" id="quietStart"><span>–</span><input type="time" id="quietEnd"></div>
+<p class="note">Bu saatler arasında animasyon oynamaz.</p></div>
+</section>
+
+<section class="card"><h2>Durum</h2>
+<dl class="info">
+<dt>WiFi</dt><dd id="iWifi">–</dd>
+<dt>Sinyal</dt><dd id="iRssi">–</dd>
+<dt>IP adresi</dt><dd id="iIp">–</dd>
+<dt>Işık sensörü</dt><dd id="iLight">–</dd>
+</dl>
+<a class="link" href="/wifi">WiFi ve saat ismi ayarları ›</a>
+</section>
 </div>
-<button onclick="updateSettings()">Ayarları Güncelle</button>
-<div class="box info" id="info"></div>
-<p><a href="/wifi">WiFi ve saat ismi ayarları</a></p>
-</div>
+
+</div></div>
+<div class="bar"><button class="btn primary" onclick="updateSettings()">Ayarları Kaydet</button></div>
 <script>
 function $(id){return document.getElementById(id)}
+function toast(t){var e=$('toast');e.textContent=t;e.className='show';clearTimeout(e.t);e.t=setTimeout(function(){e.className=''},2200)}
+function sync(){
+  $('bar1').disabled=$('autoBar1').checked; $('slider1').className='slider'+($('autoBar1').checked?' off':'');
+  $('bar2').disabled=$('autoBar2').checked; $('slider2').className='slider'+($('autoBar2').checked?' off':'');
+  $('quietTimes').style.opacity=$('quiet').checked?1:.35;
+}
+function signal(r){return (r>-60?'Çok iyi':r>-70?'İyi':r>-80?'Zayıf':'Çok zayıf')+' ('+r+' dBm)'}
+function showInfo(d){
+  $('clockTitle').textContent=d.clockName; document.title=d.clockName+' · Saat Ayarları';
+  $('clockTime').textContent=d.time;
+  $('iWifi').textContent=d.ssid; $('iRssi').textContent=signal(d.rssi);
+  $('iIp').textContent=d.ip; $('iLight').textContent=d.lightSensor;
+}
 fetch('/getSettings').then(function(r){return r.json()}).then(function(d){
-  $('clockTitle').textContent=d.clockName;
-  $('autoBar1').checked=d.autoClockBrightness;
-  $('autoBar2').checked=d.autoDownlightBrightness;
+  $('autoBar1').checked=d.autoClockBrightness; $('autoBar2').checked=d.autoDownlightBrightness;
   $('bar1').value=$('bar1Value').textContent=d.clockBrightness;
   $('bar2').value=$('bar2Value').textContent=d.downlightBrightness;
-  $('bar1').disabled=d.autoClockBrightness;
-  $('bar2').disabled=d.autoDownlightBrightness;
-  $('minuteColor').value='#'+d.minuteColor;
-  $('hourColor').value='#'+d.hourColor;
-  $('minuteAnim').value=d.minuteAnimation;
-  $('hourAnim').value=d.hourAnimation;
+  $('minuteColor').value='#'+d.minuteColor; $('hourColor').value='#'+d.hourColor;
+  $('minuteAnim').value=d.minuteAnimation; $('hourAnim').value=d.hourAnimation;
   $('speed'+d.animationSpeed).checked=true;
-  $('quiet').checked=d.quietEnabled;
-  $('quietStart').value=d.quietStart;
-  $('quietEnd').value=d.quietEnd;
-  $('info').innerHTML='Saat: '+d.time+'<br>WiFi: '+d.ssid+' ('+d.rssi+' dBm)<br>IP: '+d.ip+'<br>Işık sensörü: '+d.lightSensor;
+  $('accompany').checked=d.downlightAccompany;
+  $('quiet').checked=d.quietEnabled; $('quietStart').value=d.quietStart; $('quietEnd').value=d.quietEnd;
+  showInfo(d); sync();
 });
+setInterval(function(){fetch('/getSettings').then(function(r){return r.json()}).then(showInfo)},15000);
 $('bar1').oninput=function(){$('bar1Value').textContent=this.value};
 $('bar2').oninput=function(){$('bar2Value').textContent=this.value};
-$('autoBar1').onchange=function(){$('bar1').disabled=this.checked};
-$('autoBar2').onchange=function(){$('bar2').disabled=this.checked};
+$('autoBar1').onchange=$('autoBar2').onchange=$('quiet').onchange=sync;
 function updateSettings(){
   fetch('/update',{method:'POST',body:new URLSearchParams({
     autoBar1:$('autoBar1').checked?1:0, autoBar2:$('autoBar2').checked?1:0,
@@ -363,54 +454,64 @@ function updateSettings(){
     minuteColor:$('minuteColor').value.substring(1), hourColor:$('hourColor').value.substring(1),
     minuteAnim:$('minuteAnim').value, hourAnim:$('hourAnim').value,
     animSpeed:document.querySelector('input[name=speed]:checked').value,
+    accompany:$('accompany').checked?1:0,
     quiet:$('quiet').checked?1:0, quietStart:$('quietStart').value, quietEnd:$('quietEnd').value
-  })}).then(function(r){alert(r.ok?'Ayarlar güncellendi!':'Hata oluştu!')})
-  .catch(function(e){alert('Hata oluştu: '+e)});
+  })}).then(function(r){toast(r.ok?'Ayarlar kaydedildi ✓':'Hata oluştu')})
+  .catch(function(){toast('Saate ulaşılamadı')});
 }
 function preview(type){
   fetch('/preview',{method:'POST',body:new URLSearchParams({
     type:type, anim:$(type=='hour'?'hourAnim':'minuteAnim').value
-  })}).then(function(r){if(!r.ok)r.text().then(alert)});
+  })}).then(function(r){if(r.ok)toast('Saatte oynatılıyor…');else r.text().then(toast)})
+  .catch(function(){toast('Saate ulaşılamadı')});
 }
 </script></body></html>)rawliteral";
 
 const char WIFI_PAGE[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 <html lang="tr"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>WiFi Ayarları</title>
-<style>
-body{font-family:Arial;margin:20px;background:#f0f0f0}
-.container{max-width:400px;margin:0 auto;padding:20px;background:#fff;border-radius:8px}
-label{display:block;margin-bottom:5px}
-input{width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box}
-button{width:100%;padding:10px;margin-top:8px;background:#4CAF50;color:#fff;border:none;border-radius:4px;cursor:pointer}
-.danger{background:#c62828}
-.note{color:#555;font-size:13px}
-</style></head><body><div class="container">
-<h2>WiFi Ayarları</h2>
-<p class="note">Saat sadece 2.4 GHz WiFi ağlarına bağlanabilir (5G olan ağlara bağlanamaz).</p>
-<label>WiFi adı (SSID):</label><input type="text" id="ssid">
-<label>Şifre:</label><input type="password" id="password">
-<label>Saat ismi:</label><input type="text" id="clockName">
-<p class="note">Saat ismi adres olarak da kullanılır: http://&lt;isim&gt;.local
-(sadece küçük harf, rakam ve tire). WiFi adını boş bırakırsanız sadece isim değişir.</p>
-<button onclick="save()">Kaydet ve yeniden başlat</button>
+<link rel="stylesheet" href="/style.css">
+</head><body>
+<div id="toast"></div>
+<div class="container narrow">
+<header><h1>WiFi ayarları</h1></header>
+<div class="grid">
+<section class="card">
+<p class="note" style="margin:0 0 4px">Saat sadece 2.4 GHz ağlara bağlanabilir (5G olan ağlara bağlanamaz).</p>
+<div class="field"><label for="ssid">WiFi adı (SSID)</label><input type="text" id="ssid" autocomplete="off" autocapitalize="none"></div>
+<div class="field"><label for="password">Şifre</label><input type="password" id="password"></div>
+<div class="field"><label for="clockName">Saat ismi</label><input type="text" id="clockName" autocapitalize="none">
+<p class="note">Adres olarak da kullanılır: http://&lt;isim&gt;.local (sadece küçük harf, rakam ve tire). WiFi adını boş bırakırsanız sadece isim değişir.</p></div>
+<button class="btn primary" onclick="save()">Kaydet ve yeniden başlat</button>
+</section>
+<section class="card"><h2>Sıfırlama</h2>
+<p class="note" style="margin:0 0 12px">Kayıtlı WiFi silinir, saat kendi isminde bir kurulum ağı açar.</p>
 <form method="POST" action="/wifi-reset" onsubmit="return confirm('Kayıtlı WiFi silinsin mi? Saat kurulum ağını açacak.')">
-<button class="danger">WiFi ayarlarını sıfırla</button></form>
-<p><a href="/">← Ana sayfa</a></p>
-</div><script>
+<button class="btn danger">WiFi ayarlarını sıfırla</button></form>
+</section>
+</div>
+<a class="link" href="/">‹ Ana sayfa</a>
+</div>
+<script>
 function $(id){return document.getElementById(id)}
+function toast(t){var e=$('toast');e.textContent=t;e.className='show';clearTimeout(e.t);e.t=setTimeout(function(){e.className=''},4000)}
 fetch('/getSettings').then(function(r){return r.json()}).then(function(d){$('clockName').value=d.clockName});
 function save(){
   fetch('/wifi',{method:'POST',body:new URLSearchParams({
     ssid:$('ssid').value, password:$('password').value, clockName:$('clockName').value
   })}).then(function(r){return r.text()}).then(function(t){alert(t)})
-  .catch(function(e){alert('Hata oluştu: '+e)});
+  .catch(function(){toast('Saate ulaşılamadı')});
 }
 </script></body></html>)rawliteral";
 
 void handleRoot() {
   server.send_P(200, "text/html; charset=utf-8", MAIN_PAGE);
+}
+
+void handleStyle() {
+  server.sendHeader("Cache-Control", "max-age=3600");
+  server.send_P(200, "text/css", STYLE_CSS);
 }
 
 void handleWifiPage() {
@@ -445,6 +546,7 @@ void handleGetSettings() {
   json += "\"minuteAnimation\":" + String(settings.minuteAnimation) + ",";
   json += "\"hourAnimation\":" + String(settings.hourAnimation) + ",";
   json += "\"animationSpeed\":" + String(settings.animationSpeed) + ",";
+  json += "\"downlightAccompany\":" + String(settings.downlightAccompany ? "true" : "false") + ",";
   json += "\"quietEnabled\":" + String(settings.quietEnabled ? "true" : "false") + ",";
   json += "\"quietStart\":\"" + minutesToText(settings.quietStart) + "\",";
   json += "\"quietEnd\":\"" + minutesToText(settings.quietEnd) + "\",";
@@ -483,6 +585,7 @@ void handleUpdate() {
     settings.hourAnimation = constrain(server.arg("hourAnim").toInt(), 0, HOUR_ANIMATION_COUNT - 1);
     settings.animationSpeed = constrain(server.arg("animSpeed").toInt(), 0, 2);
     settings.quietEnabled = server.arg("quiet") == "1";
+    settings.downlightAccompany = server.arg("accompany") == "1";
     int quietStart = textToMinutes(server.arg("quietStart"));
     int quietEnd = textToMinutes(server.arg("quietEnd"));
     if (quietStart >= 0) settings.quietStart = quietStart;
@@ -616,6 +719,11 @@ void loadSettings() {
     settings.quietStart = 23 * 60;
     settings.quietEnd = 7 * 60;
   }
+
+  if (settings.extraMagic != EXTRA_MAGIC) {
+    settings.extraMagic = EXTRA_MAGIC;
+    settings.downlightAccompany = false;
+  }
 }
 
 void saveSettings() {
@@ -703,12 +811,13 @@ void updateDisplay() {
     if (displayedMinute < 0) checkTimeChange();
 
     float downlightFactor = 1.0;
+    downlightAnimationColour = 0xFFFFFF;
     if (animationActive) downlightFactor = drawAnimationFrame();
     else drawFace(newFace);
 
     shownDownlightPwm = levelToPwm(downlightLevel);
     stripDownlighter.setBrightness(round(shownDownlightPwm * downlightFactor));
-    stripDownlighter.fill(stripDownlighter.Color(255, 255, 255));
+    stripDownlighter.fill(downlightAnimationColour);
   } else {
     stripClock.clear();
     // Saat henüz yok: alt ışıklarla durumu göster
